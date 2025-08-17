@@ -1,5 +1,5 @@
 // server.js
-// Scraper + API para página SHOUTcast - root (/) retorna JSON
+// Scraper + API para página SHOUTcast (corrigido com streamGenre limpo)
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -26,7 +26,7 @@ let cachedData = {
   listenerPeak: "",
   avgListenTime: "",
   streamTitle: "",
-  streamGenre: "",   // <- sempre string (nunca null)
+  streamGenre: "",
   contentType: "",
   streamUrl: "",
   currentSong: "",
@@ -36,11 +36,29 @@ let cachedData = {
 let lastFetch = 0;
 let isFetching = false;
 
+// util: parse int seguro
 function parseIntSafe(v) {
   if (v === null || v === undefined) return 0;
   const s = String(v).replace(/\./g, '');
   const m = s.match(/(\d+)/);
   return m ? parseInt(m[1], 10) : 0;
+}
+
+// remove <script>…</script>
+function stripScripts(html) {
+  return html.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+}
+
+// limpa HTML/JS/labels extras
+function sanitize(value) {
+  if (!value) return '';
+  let s = String(value);
+  s = s.replace(/<[^>]+>/g, ' '); // remove tags
+  s = s.replace(/(Stream URL:|Stream ICQ:|Stream AIM:|Stream IRC:|Current Song:|Content Type:|Server Status:|Stream Status:)/gi, ' ');
+  s = s.replace(/var\s+[a-zA-Z0-9_]+\s*=\s*[^;]+;/g, ' ');
+  s = s.replace(/['"`]/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
 }
 
 async function scrapeShoutcastData() {
@@ -50,7 +68,10 @@ async function scrapeShoutcastData() {
       timeout: AXIOS_TIMEOUT
     });
     const html = res.data;
-    const $ = cheerio.load(html);
+
+    // removendo scripts antes de carregar
+    const htmlNoScripts = stripScripts(html);
+    const $ = cheerio.load(htmlNoScripts);
 
     const out = {
       serverStatus: "",
@@ -72,20 +93,19 @@ async function scrapeShoutcastData() {
       lastUpdated: new Date().toISOString()
     };
 
-    // Extrai de tabelas (aceita valor vazio)
+    // tabela
     $('table tr').each((i, el) => {
       const label = $(el).find('td:first-child').text().trim().replace(':', '');
       const valueRaw = $(el).find('td:last-child').text().trim();
-      if (!label) return; // se não tem label, pula
-
-      const value = valueRaw === undefined || valueRaw === null ? '' : valueRaw;
+      if (!label) return;
+      const value = valueRaw || "";
       const L = label.toLowerCase();
 
       if (L.includes('server status')) {
-        out.serverStatus = value || "";
+        out.serverStatus = value;
         out.isServerUp = /up/i.test(value);
       } else if (L.includes('stream status')) {
-        out.streamStatus = value || "";
+        out.streamStatus = value;
         out.isStreamUp = /stream|up/i.test(value);
         const bMatch = value.match(/(\d+)\s*kbps/i);
         if (bMatch) out.bitrate = String(parseIntSafe(bMatch[1]));
@@ -101,37 +121,39 @@ async function scrapeShoutcastData() {
       } else if (L.includes('max listeners')) {
         out.maxListeners = parseIntSafe(value);
       } else if (L.includes('current song') || L.includes('now playing')) {
-        out.currentSong = value || "";
+        out.currentSong = value;
       } else if (L.includes('stream title') || L.includes('station name')) {
-        out.streamTitle = value || "";
+        out.streamTitle = value;
       } else if (L.includes('content type')) {
-        out.contentType = value || "";
+        out.contentType = value;
       } else if (L.includes('stream url') || L.includes('streamurl')) {
-        out.streamUrl = value || "";
+        out.streamUrl = value;
       } else if (L.includes('audio stream') || L.includes('audio stream url')) {
-        out.audioStreamUrl = value || "";
+        out.audioStreamUrl = value;
       } else if (L.includes('listener peak') || L.includes('peak listeners')) {
         out.listenerPeak = String(parseIntSafe(value));
       } else if (L.includes('average listen time') || L.includes('avg listen time')) {
-        out.avgListenTime = value || "";
+        out.avgListenTime = value;
       } else if (L.includes('stream genre') || L.includes('genre')) {
-        out.streamGenre = value || "";
+        out.streamGenre = value;
       }
     });
 
-    // Heurísticas via texto
     const text = $.root().text();
 
+    // stream title
     if (!out.streamTitle) {
       const m = text.match(/(?:Stream Title|Station Name|Stream:)\s*[:\-]?\s*([^\n\r]+)/i);
       if (m) out.streamTitle = m[1].trim();
     }
 
+    // current song
     if (!out.currentSong) {
       const m = text.match(/(?:Current Song|Now Playing)\s*[:\-]?\s*([^\n\r]+)/i);
       if (m) out.currentSong = m[1].trim();
     }
 
+    // audio stream url
     if (!out.audioStreamUrl) {
       const m = html.match(/(https?:\/\/[^\s"'<>]+\/;?)/i);
       if (m) out.audioStreamUrl = m[1];
@@ -177,17 +199,21 @@ async function scrapeShoutcastData() {
       try {
         const url = new URL(out.audioStreamUrl);
         out.streamUrl = url.hostname.replace(/^www\./, '');
-      } catch (e) { /* ignore */ }
+      } catch {}
     }
 
-    // streamGenre fallback (captura mesmo se estiver vazio)
-    if (out.streamGenre === null || out.streamGenre === undefined || out.streamGenre === "") {
-      const m = text.match(/(?:Stream Genre|Genre)\s*[:\-]?\s*([^\n\r]*)/i);
-      if (m) out.streamGenre = (m[1] || "").trim();
-      else out.streamGenre = ""; // garantir string vazia
+    // ======== streamGenre seguro ========
+    if (!out.streamGenre) {
+      const genreRegex = /(?:Stream Genre|Genre)\s*[:\-]?\s*([\s\S]*?)(?=(?:Stream URL:|Stream ICQ:|Stream AIM:|Stream IRC:|Current Song:|Content Type:|Server Status:|Stream Status:|$))/i;
+      const gm = htmlNoScripts.match(genreRegex);
+      if (gm && gm[1]) {
+        out.streamGenre = sanitize(gm[1]);
+      } else {
+        const gm2 = text.match(/(?:Stream Genre|Genre)\s*[:\-]?\s*([^\n\r]*)/i);
+        out.streamGenre = sanitize(gm2 ? gm2[1] : '');
+      }
     }
 
-    // server/stream fallback
     if (!out.serverStatus) {
       const m = text.match(/Server is currently (up|down)/i);
       if (m) {
@@ -203,12 +229,11 @@ async function scrapeShoutcastData() {
 
     return out;
   } catch (err) {
-    console.error('[scrape] erro:', err && err.message ? err.message : err);
+    console.error('[scrape] erro:', err.message);
     return null;
   }
 }
 
-/** Função para retornar JSON normalizado (garante streamGenre não-nulo) */
 function normalizeData(src) {
   return {
     serverStatus: src.serverStatus ?? "",
@@ -222,7 +247,7 @@ function normalizeData(src) {
     listenerPeak: src.listenerPeak ?? "",
     avgListenTime: src.avgListenTime ?? "",
     streamTitle: src.streamTitle ?? "",
-    streamGenre: src.streamGenre ?? "", // sempre string
+    streamGenre: src.streamGenre ?? "",
     contentType: src.contentType ?? "",
     streamUrl: src.streamUrl ?? "",
     currentSong: src.currentSong ?? "",
@@ -231,7 +256,7 @@ function normalizeData(src) {
   };
 }
 
-// ROTA PRINCIPAL: serve o JSON em /
+// root
 app.get('/', async (req, res) => {
   const now = Date.now();
   if (!cachedData.lastUpdated || (now - lastFetch) > CACHE_DURATION) {
@@ -240,39 +265,29 @@ app.get('/', async (req, res) => {
       if (data) {
         cachedData = data;
         lastFetch = Date.now();
-      } else {
-        console.warn('[api] scrape retornou null, usando cache');
       }
     } catch (e) {
-      console.error('[api] erro ao scrappear:', e && e.message ? e.message : e);
+      console.error('[api] erro scrape:', e.message);
     }
   }
   res.json(normalizeData(cachedData));
 });
 
-// Alias para compatibilidade
-app.get('/api/stream-info', (req, res) => {
-  res.json(normalizeData(cachedData));
-});
-
+// opcional alias
 app.get('/api/status', (req, res) => {
   res.json({ ok: true, lastUpdated: cachedData.lastUpdated });
 });
 
 const server = app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando em http://localhost:${PORT} (root -> JSON). SCRAPE_URL=${SCRAPE_URL}`);
-
+  console.log(`🚀 Servidor rodando em http://localhost:${PORT}`);
   (async () => {
     const data = await scrapeShoutcastData();
     if (data) {
       cachedData = data;
       lastFetch = Date.now();
       console.log('✅ Dados iniciais carregados');
-    } else {
-      console.log('⚠️ Falha ao carregar dados iniciais (usar cache padrão)');
     }
   })();
-
   setInterval(async () => {
     const now = Date.now();
     if (isFetching) return;
@@ -285,7 +300,7 @@ const server = app.listen(PORT, () => {
         lastFetch = Date.now();
       }
     } catch (e) {
-      console.error('[background] erro:', e && e.message ? e.message : e);
+      console.error('[background] erro:', e.message);
     } finally {
       isFetching = false;
     }
