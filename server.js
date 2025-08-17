@@ -29,6 +29,7 @@ let cachedData = {
   listenerPeak: null,
   avgListenTime: null,
   streamTitle: null,
+  streamGenre: null,
   contentType: null,
   streamUrl: null,
   currentSong: null,
