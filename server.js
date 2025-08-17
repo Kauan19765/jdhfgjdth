@@ -1,17 +1,21 @@
+// server.js
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const cors = require('cors');   // <── habilita CORS
+const cors = require('cors');
+const path = require('path');
 
 const app = express();
-app.use(cors());                // <── permite que qualquer site consuma sua API
-
 const PORT = process.env.PORT || 3000;
 
 const SCRAPE_URL = process.env.SCRAPE_URL || 'http://sonicpanel.oficialserver.com:8342/index.html';
 const CACHE_DURATION = parseInt(process.env.CACHE_MS || '1000', 10);
 const AXIOS_TIMEOUT = parseInt(process.env.AXIOS_TIMEOUT || '8000', 10);
 const USER_AGENT = process.env.USER_AGENT || 'Mozilla/5.0 (compatible; Scraper/1.0)';
+
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 let cachedData = {
   serverStatus: null,
@@ -69,7 +73,7 @@ async function scrapeShoutcastData() {
     };
 
     $('table tr').each((i, el) => {
-      const label = $(el).find('td:first-child').text().trim().replace(':','');
+      const label = $(el).find('td:first-child').text().trim().replace(':', '');
       const value = $(el).find('td:last-child').text().trim();
       if (!label || !value) return;
       const L = label.toLowerCase();
@@ -80,7 +84,7 @@ async function scrapeShoutcastData() {
         out.streamStatus = value;
         out.isStreamUp = /stream|up/i.test(value);
         const bMatch = value.match(/(\d+)\s*kbps/i);
-        if (bMatch) out.bitrate = parseInt(bMatch[1],10);
+        if (bMatch) out.bitrate = parseInt(bMatch[1], 10);
         const listenersMatch = value.match(/with\s+(\d+)\s+of\s+(\d+)/i);
         if (listenersMatch) {
           out.currentListeners = parseIntSafe(listenersMatch[1]);
@@ -159,10 +163,9 @@ async function scrapeShoutcastData() {
     if (!out.streamUrl && out.audioStreamUrl) {
       try {
         const url = new URL(out.audioStreamUrl);
-        out.streamUrl = url.hostname.replace(/^www\./,'');
-      } catch (e) {}
+        out.streamUrl = url.hostname.replace(/^www\./, '');
+      } catch (e) { /* ignore */ }
     }
-
     if (!out.serverStatus) {
       const m = text.match(/Server is currently (up|down)/i);
       if (m) {
@@ -183,24 +186,44 @@ async function scrapeShoutcastData() {
   }
 }
 
-app.get('/api/stream-info', async (req, res) => {
+// ROTA PRINCIPAL: serve o JSON direto em "/"
+app.get(['/', '/api/stream-info'], async (req, res) => {
   const now = Date.now();
-  if (!cachedData.lastUpdated || (now - lastFetch) > CACHE_DURATION) {
+  if (!cachedData.lastUpdated || now - lastFetch > CACHE_DURATION) {
     try {
       const data = await scrapeShoutcastData();
       if (data) {
         cachedData = data;
         lastFetch = Date.now();
       }
-    } catch (e) {}
+    } catch (e) {
+      // ignore
+    }
   }
-  res.setHeader("Content-Type", "application/json");
   return res.json(cachedData);
 });
 
 app.get('/api/status', (req, res) => {
-  res.setHeader("Content-Type", "application/json");
   return res.json({ ok: true, lastUpdated: cachedData.lastUpdated });
+});
+
+// Se você quiser servir arquivos estáticos (ex: frontend), coloque-os em "public"
+app.use(express.static(path.join(__dirname, 'public')));
+
+// fallback simples para rotas não-API (opcional)
+// Observação: se você usar SPA, remova/ajuste esse fallback para enviar index.html
+app.get('*', (req, res) => {
+  // se a rota é /api/... devolve 404 JSON
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: 'API endpoint not found' });
+  }
+  // caso contrário, devolve uma página simples (pode ser index.html na pasta public)
+  res.sendFile(path.join(__dirname, 'public', 'index.html'), (err) => {
+    if (err) {
+      // se não existir index.html, retorna uma resposta simples
+      res.send('<h1>Shoutcast Scraper</h1><p>Use <a href="/api/stream-info">/api/stream-info</a> ou abra / para ver o JSON.</p>');
+    }
+  });
 });
 
 const server = app.listen(PORT, () => {
@@ -219,7 +242,7 @@ const server = app.listen(PORT, () => {
   setInterval(async () => {
     const now = Date.now();
     if (isFetching) return;
-    if ((now - lastFetch) < CACHE_DURATION) return;
+    if (now - lastFetch < CACHE_DURATION) return;
     isFetching = true;
     try {
       const data = await scrapeShoutcastData();
