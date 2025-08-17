@@ -1,5 +1,5 @@
 // server.js
-// Scraper + API para página SHOUTcast - versão com streamGenre e normalização
+// Scraper + API para página SHOUTcast - root (/) retorna JSON
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -15,28 +15,27 @@ const AXIOS_TIMEOUT = parseInt(process.env.AXIOS_TIMEOUT || '8000', 10);
 const USER_AGENT = process.env.USER_AGENT || 'Mozilla/5.0 (compatible; Scraper/1.0)';
 
 let cachedData = {
-  serverStatus: null,
+  serverStatus: "",
   isServerUp: false,
-  streamStatus: null,
+  streamStatus: "",
   currentListeners: 0,
   maxListeners: 0,
   uniqueListeners: 0,
-  bitrate: null,
+  bitrate: "",
   isStreamUp: false,
-  listenerPeak: null,
-  avgListenTime: null,
-  streamTitle: null,
-  streamGenre: null,   // <- adicionado
-  contentType: null,
-  streamUrl: null,
-  currentSong: null,
-  audioStreamUrl: null,
-  lastUpdated: null
+  listenerPeak: "",
+  avgListenTime: "",
+  streamTitle: "",
+  streamGenre: "",   // <- sempre string (nunca null)
+  contentType: "",
+  streamUrl: "",
+  currentSong: "",
+  audioStreamUrl: "",
+  lastUpdated: new Date().toISOString()
 };
 let lastFetch = 0;
 let isFetching = false;
 
-/** util: parse int seguro */
 function parseIntSafe(v) {
   if (v === null || v === undefined) return 0;
   const s = String(v).replace(/\./g, '');
@@ -44,7 +43,6 @@ function parseIntSafe(v) {
   return m ? parseInt(m[1], 10) : 0;
 }
 
-/** Função que faz o scraping/heurísticas */
 async function scrapeShoutcastData() {
   try {
     const res = await axios.get(SCRAPE_URL, {
@@ -55,31 +53,30 @@ async function scrapeShoutcastData() {
     const $ = cheerio.load(html);
 
     const out = {
-      serverStatus: null,
+      serverStatus: "",
       isServerUp: false,
-      streamStatus: null,
+      streamStatus: "",
       currentListeners: 0,
       maxListeners: 0,
       uniqueListeners: 0,
-      bitrate: null,
+      bitrate: "",
       isStreamUp: false,
-      listenerPeak: null,
-      avgListenTime: null,
-      streamTitle: null,
-      streamGenre: null,
-      contentType: null,
-      streamUrl: null,
-      currentSong: null,
-      audioStreamUrl: null,
+      listenerPeak: "",
+      avgListenTime: "",
+      streamTitle: "",
+      streamGenre: "",
+      contentType: "",
+      streamUrl: "",
+      currentSong: "",
+      audioStreamUrl: "",
       lastUpdated: new Date().toISOString()
     };
 
-    // 1) tentar extrair de tabelas (não ignorar linhas com value vazio)
+    // Extrai de tabelas (aceita valor vazio)
     $('table tr').each((i, el) => {
       const label = $(el).find('td:first-child').text().trim().replace(':', '');
       const valueRaw = $(el).find('td:last-child').text().trim();
-      // se não tiver label, pula; valor pode ser vazio - aceitamos isso
-      if (!label) return;
+      if (!label) return; // se não tem label, pula
 
       const value = valueRaw === undefined || valueRaw === null ? '' : valueRaw;
       const L = label.toLowerCase();
@@ -91,7 +88,7 @@ async function scrapeShoutcastData() {
         out.streamStatus = value || "";
         out.isStreamUp = /stream|up/i.test(value);
         const bMatch = value.match(/(\d+)\s*kbps/i);
-        if (bMatch) out.bitrate = parseIntSafe(bMatch[1]);
+        if (bMatch) out.bitrate = String(parseIntSafe(bMatch[1]));
         const listenersMatch = value.match(/with\s+(\d+)\s+of\s+(\d+)/i);
         if (listenersMatch) {
           out.currentListeners = parseIntSafe(listenersMatch[1]);
@@ -114,17 +111,15 @@ async function scrapeShoutcastData() {
       } else if (L.includes('audio stream') || L.includes('audio stream url')) {
         out.audioStreamUrl = value || "";
       } else if (L.includes('listener peak') || L.includes('peak listeners')) {
-        out.listenerPeak = parseIntSafe(value);
+        out.listenerPeak = String(parseIntSafe(value));
       } else if (L.includes('average listen time') || L.includes('avg listen time')) {
         out.avgListenTime = value || "";
       } else if (L.includes('stream genre') || L.includes('genre')) {
-        // aceita valor vazio (""), não descarta a chave
         out.streamGenre = value || "";
       }
-      // outras linhas simplesmente ignoradas
     });
 
-    // 2) heurísticas via texto do HTML (fallbacks)
+    // Heurísticas via texto
     const text = $.root().text();
 
     if (!out.streamTitle) {
@@ -137,7 +132,6 @@ async function scrapeShoutcastData() {
       if (m) out.currentSong = m[1].trim();
     }
 
-    // audio stream url (ex.: http://.../;)
     if (!out.audioStreamUrl) {
       const m = html.match(/(https?:\/\/[^\s"'<>]+\/;?)/i);
       if (m) out.audioStreamUrl = m[1];
@@ -145,7 +139,7 @@ async function scrapeShoutcastData() {
 
     if (!out.bitrate) {
       const m = text.match(/(\d+)\s*kbps/i);
-      if (m) out.bitrate = parseIntSafe(m[1]);
+      if (m) out.bitrate = String(parseIntSafe(m[1]));
     }
 
     if ((!out.currentListeners || !out.maxListeners) && text) {
@@ -166,7 +160,7 @@ async function scrapeShoutcastData() {
 
     if (!out.listenerPeak) {
       const m = text.match(/(listener peak|peak listeners|peak)\s*[:\-]?\s*(\d+)/i);
-      if (m) out.listenerPeak = parseIntSafe(m[2]);
+      if (m) out.listenerPeak = String(parseIntSafe(m[2]));
     }
 
     if (!out.avgListenTime) {
@@ -179,7 +173,6 @@ async function scrapeShoutcastData() {
       if (m) out.contentType = m[0];
     }
 
-    // streamUrl domain fallback
     if (!out.streamUrl && out.audioStreamUrl) {
       try {
         const url = new URL(out.audioStreamUrl);
@@ -187,14 +180,14 @@ async function scrapeShoutcastData() {
       } catch (e) { /* ignore */ }
     }
 
-    // streamGenre fallback via regex (captura mesmo se estiver vazio)
-    if (out.streamGenre === null || out.streamGenre === undefined) {
+    // streamGenre fallback (captura mesmo se estiver vazio)
+    if (out.streamGenre === null || out.streamGenre === undefined || out.streamGenre === "") {
       const m = text.match(/(?:Stream Genre|Genre)\s*[:\-]?\s*([^\n\r]*)/i);
-      if (m) out.streamGenre = m[1].trim();
+      if (m) out.streamGenre = (m[1] || "").trim();
       else out.streamGenre = ""; // garantir string vazia
     }
 
-    // server/stream status fallback
+    // server/stream fallback
     if (!out.serverStatus) {
       const m = text.match(/Server is currently (up|down)/i);
       if (m) {
@@ -210,13 +203,36 @@ async function scrapeShoutcastData() {
 
     return out;
   } catch (err) {
-    console.error('[scrape] erro:', err.message);
+    console.error('[scrape] erro:', err && err.message ? err.message : err);
     return null;
   }
 }
 
-/** rota: devolve JSON com normalização (null -> "" etc) */
-app.get('/api/stream-info', async (req, res) => {
+/** Função para retornar JSON normalizado (garante streamGenre não-nulo) */
+function normalizeData(src) {
+  return {
+    serverStatus: src.serverStatus ?? "",
+    isServerUp: src.isServerUp ?? false,
+    streamStatus: src.streamStatus ?? "",
+    currentListeners: src.currentListeners ?? 0,
+    maxListeners: src.maxListeners ?? 0,
+    uniqueListeners: src.uniqueListeners ?? 0,
+    bitrate: src.bitrate ?? "",
+    isStreamUp: src.isStreamUp ?? false,
+    listenerPeak: src.listenerPeak ?? "",
+    avgListenTime: src.avgListenTime ?? "",
+    streamTitle: src.streamTitle ?? "",
+    streamGenre: src.streamGenre ?? "", // sempre string
+    contentType: src.contentType ?? "",
+    streamUrl: src.streamUrl ?? "",
+    currentSong: src.currentSong ?? "",
+    audioStreamUrl: src.audioStreamUrl ?? "",
+    lastUpdated: src.lastUpdated ?? new Date().toISOString()
+  };
+}
+
+// ROTA PRINCIPAL: serve o JSON em /
+app.get('/', async (req, res) => {
   const now = Date.now();
   if (!cachedData.lastUpdated || (now - lastFetch) > CACHE_DURATION) {
     try {
@@ -225,59 +241,38 @@ app.get('/api/stream-info', async (req, res) => {
         cachedData = data;
         lastFetch = Date.now();
       } else {
-        // se scrape falhar, mantemos cachedData atual
         console.warn('[api] scrape retornou null, usando cache');
       }
     } catch (e) {
       console.error('[api] erro ao scrappear:', e && e.message ? e.message : e);
     }
   }
+  res.json(normalizeData(cachedData));
+});
 
-  // Normalização: garantir chaves e trocar null/undefined por valores sensatos
-  const normalized = {
-    serverStatus: cachedData.serverStatus ?? "",
-    isServerUp: cachedData.isServerUp ?? false,
-    streamStatus: cachedData.streamStatus ?? "",
-    currentListeners: cachedData.currentListeners ?? 0,
-    maxListeners: cachedData.maxListeners ?? 0,
-    uniqueListeners: cachedData.uniqueListeners ?? 0,
-    bitrate: cachedData.bitrate ?? "",
-    isStreamUp: cachedData.isStreamUp ?? false,
-    listenerPeak: cachedData.listenerPeak ?? "",
-    avgListenTime: cachedData.avgListenTime ?? "",
-    streamTitle: cachedData.streamTitle ?? "",
-    streamGenre: cachedData.streamGenre ?? "", // <-- sempre presente (pode ser "")
-    contentType: cachedData.contentType ?? "",
-    streamUrl: cachedData.streamUrl ?? "",
-    currentSong: cachedData.currentSong ?? "",
-    audioStreamUrl: cachedData.audioStreamUrl ?? "",
-    lastUpdated: cachedData.lastUpdated ?? new Date().toISOString()
-  };
-
-  res.json(normalized);
+// Alias para compatibilidade
+app.get('/api/stream-info', (req, res) => {
+  res.json(normalizeData(cachedData));
 });
 
 app.get('/api/status', (req, res) => {
   res.json({ ok: true, lastUpdated: cachedData.lastUpdated });
 });
 
-// start server
 const server = app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando em http://localhost:${PORT} (SCRAPE_URL=${SCRAPE_URL})`);
+  console.log(`🚀 Servidor rodando em http://localhost:${PORT} (root -> JSON). SCRAPE_URL=${SCRAPE_URL}`);
 
-  // fetch inicial
   (async () => {
     const data = await scrapeShoutcastData();
     if (data) {
       cachedData = data;
       lastFetch = Date.now();
-      console.log('✅ Dados iniciais carregados com sucesso');
+      console.log('✅ Dados iniciais carregados');
     } else {
-      console.log('⚠️ Falha ao carregar dados iniciais (mantendo cache padrão)');
+      console.log('⚠️ Falha ao carregar dados iniciais (usar cache padrão)');
     }
   })();
 
-  // loop de atualização em background (respeita CACHE_DURATION)
   setInterval(async () => {
     const now = Date.now();
     if (isFetching) return;
@@ -288,7 +283,6 @@ const server = app.listen(PORT, () => {
       if (data) {
         cachedData = data;
         lastFetch = Date.now();
-        //console.log('🔄 Dados atualizados');
       }
     } catch (e) {
       console.error('[background] erro:', e && e.message ? e.message : e);
