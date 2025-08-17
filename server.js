@@ -1,9 +1,11 @@
-// server.js (substitua o seu por este)
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const cors = require('cors');   // <── habilita CORS
 
 const app = express();
+app.use(cors());                // <── permite que qualquer site consuma sua API
+
 const PORT = process.env.PORT || 3000;
 
 const SCRAPE_URL = process.env.SCRAPE_URL || 'http://sonicpanel.oficialserver.com:8342/index.html';
@@ -32,18 +34,12 @@ let cachedData = {
 let lastFetch = 0;
 let isFetching = false;
 
-/**
- * Tenta extrair números de uma string (primeiro match de digitos)
- */
 function parseIntSafe(v) {
   if (!v) return 0;
   const m = v.toString().replace(/\./g, '').match(/(\d+)/);
   return m ? parseInt(m[1], 10) : 0;
 }
 
-/**
- * Extrai campos com heurísticas: tenta tabela primeiro, depois regex no HTML.
- */
 async function scrapeShoutcastData() {
   try {
     const res = await axios.get(SCRAPE_URL, {
@@ -72,7 +68,6 @@ async function scrapeShoutcastData() {
       lastUpdated: new Date().toISOString()
     };
 
-    // 1) TENTAR extrair via tabela se existir (estruturas como 'td:first-child' foram usadas antes)
     $('table tr').each((i, el) => {
       const label = $(el).find('td:first-child').text().trim().replace(':','');
       const value = $(el).find('td:last-child').text().trim();
@@ -84,8 +79,6 @@ async function scrapeShoutcastData() {
       } else if (L.includes('stream status')) {
         out.streamStatus = value;
         out.isStreamUp = /stream|up/i.test(value);
-        // tentar extrair bitrate/listeners de um texto do tipo:
-        // "Stream is up at 128 kbps with 153 of 1000 listeners (1 unique)"
         const bMatch = value.match(/(\d+)\s*kbps/i);
         if (bMatch) out.bitrate = parseInt(bMatch[1],10);
         const listenersMatch = value.match(/with\s+(\d+)\s+of\s+(\d+)/i);
@@ -116,28 +109,23 @@ async function scrapeShoutcastData() {
       }
     });
 
-    // 2) Se faltou algo, tentar heurísticas via regex no HTML textual
     const text = $.root().text();
 
-    // stream title
     if (!out.streamTitle) {
       const m = text.match(/(?:Stream Title|Station Name|Stream:)\s*[:\-]?\s*([^\n\r]+)/i);
       if (m) out.streamTitle = m[1].trim();
     }
 
-    // current song (comum em linhas tipo "Current Song: ...")
     if (!out.currentSong) {
       const m = text.match(/(?:Current Song|Now Playing)\s*[:\-]?\s*([^\n\r]+)/i);
       if (m) out.currentSong = m[1].trim();
     }
 
-    // audio stream url (ex.: http://sonicpanel.../;)
     if (!out.audioStreamUrl) {
       const m = html.match(/(http[s]?:\/\/[^\s"'<>]+\/;?)/i);
       if (m) out.audioStreamUrl = m[1];
     }
 
-    // bitrate/listeners from other possible text forms
     if (!out.bitrate) {
       const m = text.match(/(\d+)\s*kbps/i);
       if (m) out.bitrate = parseIntSafe(m[1]);
@@ -148,7 +136,6 @@ async function scrapeShoutcastData() {
         out.currentListeners = parseIntSafe(m[1]);
         out.maxListeners = parseIntSafe(m[2]);
       } else {
-        // alternativa: "153 listeners"
         const m2 = text.match(/(\d+)\s+listeners/i);
         if (m2) out.currentListeners = parseIntSafe(m2[1]);
       }
@@ -157,30 +144,25 @@ async function scrapeShoutcastData() {
       const m = text.match(/\((\d+)\s*unique\)/i);
       if (m) out.uniqueListeners = parseIntSafe(m[1]);
     }
-    // listener peak
     if (!out.listenerPeak) {
       const m = text.match(/(listener peak|peak listeners|peak)\s*[:\-]?\s*(\d+)/i);
       if (m) out.listenerPeak = parseIntSafe(m[2]);
     }
-    // avg listen time
     if (!out.avgListenTime) {
       const m = text.match(/(?:avg(?:erage)? listen time|avg listen time)\s*[:\-]?\s*([^\n\r]+)/i);
       if (m) out.avgListenTime = m[1].trim();
     }
-    // content type
     if (!out.contentType) {
       const m = text.match(/audio\/[a-z0-9.+-]+/i);
       if (m) out.contentType = m[0];
     }
-    // streamUrl (domain)
     if (!out.streamUrl && out.audioStreamUrl) {
       try {
         const url = new URL(out.audioStreamUrl);
         out.streamUrl = url.hostname.replace(/^www\./,'');
-      } catch (e) { /* ignore */ }
+      } catch (e) {}
     }
 
-    // final isServerUp/isStreamUp fallback
     if (!out.serverStatus) {
       const m = text.match(/Server is currently (up|down)/i);
       if (m) {
@@ -197,36 +179,32 @@ async function scrapeShoutcastData() {
     return out;
   } catch (err) {
     console.error('[scrape] erro:', err.message);
-    return null; // sinaliza falha para o chamador
+    return null;
   }
 }
 
-// rota que devolve o JSON detalhado (mantendo cachedData se scrape falhar)
 app.get('/api/stream-info', async (req, res) => {
   const now = Date.now();
   if (!cachedData.lastUpdated || (now - lastFetch) > CACHE_DURATION) {
-    // tentativa de fallback síncrona para requests que peçam dados frescos
     try {
       const data = await scrapeShoutcastData();
       if (data) {
         cachedData = data;
         lastFetch = Date.now();
       }
-    } catch (e) {
-      // swallow
-    }
+    } catch (e) {}
   }
+  res.setHeader("Content-Type", "application/json");
   return res.json(cachedData);
 });
 
 app.get('/api/status', (req, res) => {
+  res.setHeader("Content-Type", "application/json");
   return res.json({ ok: true, lastUpdated: cachedData.lastUpdated });
 });
 
-// start server imediatamente
 const server = app.listen(PORT, () => {
   console.log(`🚀 Servidor rodando em http://localhost:${PORT}`);
-  // fetch inicial em background
   (async () => {
     const data = await scrapeShoutcastData();
     if (data) {
@@ -238,7 +216,6 @@ const server = app.listen(PORT, () => {
     }
   })();
 
-  // loop de atualização em background
   setInterval(async () => {
     const now = Date.now();
     if (isFetching) return;
@@ -249,7 +226,6 @@ const server = app.listen(PORT, () => {
       if (data) {
         cachedData = data;
         lastFetch = Date.now();
-        // console.log('🔄 Dados atualizados');
       }
     } catch (e) {
       console.error('[background] erro:', e.message);
@@ -259,7 +235,6 @@ const server = app.listen(PORT, () => {
   }, Math.max(500, CACHE_DURATION));
 });
 
-// proteger processos
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 process.on('unhandledRejection', (reason) => console.error('[unhandledRejection]', reason));
 
