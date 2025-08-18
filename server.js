@@ -307,25 +307,139 @@ const server = app.listen(PORT, () => {
   }, Math.max(500, CACHE_DURATION));
 });
 
-// rota /player -> copia simples do sonicpanel player, mas com CORS liberado
-app.get('/player', (req, res) => {
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="pt-BR">
-    <head>
-      <meta name="viewport" content="width=device-width">
-      <title>Player Ao Vivo</title>
-    </head>
-    <body style="margin:0;display:flex;justify-content:center;align-items:center;height:100vh;background:#111;color:#fff">
-      <video controls autoplay name="media" style="width:100%;max-width:400px">
-        <source src="http://sonicpanel.oficialserver.com:8342/;" type="audio/mpeg">
-        Seu navegador não suporta o player de áudio.
-      </video>
-    </body>
-    </html>
-  `);
+// ---------------------- Player em "/;" ----------------------
+// Cole isto após `const app = express()` no seu server.js
+
+const path = require('path');
+
+// servir public (opcional)
+app.use(express.static(path.join(__dirname, 'public')));
+
+// rota de metadata (opcional — usa cachedData se existir)
+app.get('/api/meta', (req, res) => {
+  res.json({
+    name: typeof cachedData !== 'undefined' && (cachedData.streamTitle || cachedData.streamUrl) ? (cachedData.streamTitle || cachedData.streamUrl) : 'Stream',
+    currentSong: typeof cachedData !== 'undefined' && cachedData.currentSong ? cachedData.currentSong : null,
+    bitrate: typeof cachedData !== 'undefined' && cachedData.bitrate ? cachedData.bitrate : null,
+    listeners: typeof cachedData !== 'undefined' && cachedData.currentListeners ? cachedData.currentListeners : null,
+    lastUpdated: typeof cachedData !== 'undefined' && cachedData.lastUpdated ? cachedData.lastUpdated : null
+  });
 });
+
+// página do player acessível em "/;"
+app.get('/;', (req, res) => {
+  res.type('html').send(`<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Player</title>
+<style>
+  body{font-family:system-ui,Arial,Helvetica,sans-serif;background:#0b0b0b;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+  .player{background:#111;padding:16px;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.6);max-width:460px;width:100%}
+  .controls{display:flex;gap:8px;align-items:center}
+  .btn{padding:8px 12px;border-radius:8px;border:0;background:#1f8ef1;color:#fff;cursor:pointer}
+  .status{font-size:13px;opacity:.9}
+  audio{display:none}
+  .meta{font-size:13px;opacity:.85;margin-top:8px}
+</style>
+</head>
+<body>
+  <div class="player">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div>
+        <div style="font-weight:700" id="station-name">Carregando...</div>
+        <div class="status" id="status">Conectando...</div>
+      </div>
+      <div>
+        <button class="btn" id="btn-play">Play</button>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="meta" id="meta">—</div>
+    </div>
+
+    <audio id="audio" crossorigin="anonymous"></audio>
+  </div>
+
+<script>
+(function(){
+  // Se o seu proxy de stream estiver em outro caminho, altere aqui.
+  const STREAM_URL = '/stream'; // <-- mantenha '/stream' ou troque se necessário
+  const META_URL = '/api/meta';
+
+  const audio = document.getElementById('audio');
+  const btn = document.getElementById('btn-play');
+  const statusEl = document.getElementById('status');
+  const metaEl = document.getElementById('meta');
+  const stationEl = document.getElementById('station-name');
+
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+
+  function setStatus(t){ statusEl.textContent = t; }
+  function setMeta(t){ metaEl.textContent = t || 'Sem metadata'; }
+
+  async function fetchMetaOnce() {
+    try {
+      const r = await fetch(META_URL, {cache:'no-store'});
+      if (!r.ok) return;
+      const j = await r.json();
+      stationEl.textContent = j.name || 'Stream';
+      if (j.currentSong) setMeta(j.currentSong);
+      else if (j.bitrate || j.listeners) setMeta((j.bitrate ? j.bitrate + ' kbps' : '') + (j.listeners ? ' • ' + j.listeners + ' ouvintes' : ''));
+    } catch(e){}
+  }
+
+  function startStream(){
+    clearTimeout(reconnectTimer);
+    audio.src = STREAM_URL + (STREAM_URL.includes('?') ? '&' : '?') + '_=' + Date.now();
+    audio.load();
+    const p = audio.play();
+    if (p && p.then) {
+      p.then(()=> {
+        btn.textContent = 'Pause';
+        setStatus('Tocando');
+      }).catch(() => {
+        setStatus('Autoplay bloqueado — clique em Play');
+        btn.textContent = 'Play';
+      });
+    }
+    fetchMetaOnce();
+  }
+
+  function stopStream(){
+    try { audio.pause(); audio.removeAttribute('src'); audio.load(); } catch(e){}
+    btn.textContent = 'Play';
+    setStatus('Parado');
+  }
+
+  function scheduleReconnect(){
+    reconnectAttempts++;
+    const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts));
+    setStatus('Tentando reconectar em ' + Math.round(delay/1000) + 's...');
+    reconnectTimer = setTimeout(() => startStream(), delay);
+  }
+
+  audio.addEventListener('error', ()=> { console.warn('audio error'); scheduleReconnect(); });
+  audio.addEventListener('stalled', ()=> { console.warn('stalled'); scheduleReconnect(); });
+  audio.addEventListener('ended', ()=> { console.warn('ended'); scheduleReconnect(); });
+
+  btn.addEventListener('click', ()=> {
+    if (audio.paused) { reconnectAttempts = 0; startStream(); }
+    else stopStream();
+  });
+
+  setInterval(fetchMetaOnce, 10000);
+  fetchMetaOnce();
+  startStream();
+})();
+</script>
+</body>
+</html>`);
+});
+// ---------------------- fim do trecho "/;" ----------------------
 
 
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
