@@ -307,6 +307,158 @@ const server = app.listen(PORT, () => {
   }, Math.max(500, CACHE_DURATION));
 });
 
+const net = require('net');
+
+// Configurações do stream
+const UP_HOST = 'sonicpanel.oficialserver.com';
+const UP_PORT = 8342;
+const UP_PATH = '/;'; // necessário manter o ";"
+
+// CORS helper
+function allowCORS(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Accept, Content-Type');
+}
+
+// Handler do stream com remoção de metadados ICY
+function handleStream(req, res) {
+  allowCORS(res);
+  res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Connection', 'keep-alive');
+
+  if (res.socket && res.socket.setNoDelay) res.socket.setNoDelay(true);
+
+  const sock = net.connect(UP_PORT, UP_HOST, () => {
+    const lines = [
+      `GET ${UP_PATH} HTTP/1.0`,
+      `Host: ${UP_HOST}`,
+      `User-Agent: Mozilla/5.0 (AudioProxy)`,
+      `Icy-MetaData: 0`,
+      `Connection: keep-alive`,
+      '\r\n'
+    ];
+    sock.write(lines.join('\r\n'));
+  });
+
+  let headerBuf = Buffer.alloc(0);
+  let headerDone = false;
+  let metaint = 0;
+  let bytesUntilMeta = 0;
+  let needMetaLenByte = false;
+  let metaBytesRemaining = 0;
+  let bodyBuf = Buffer.alloc(0);
+
+  function parseHeaders(head) {
+    const lines = head.split(/\r?\n/);
+    lines.shift(); // remove status line
+    const headers = {};
+    for (const l of lines) {
+      const idx = l.indexOf(':');
+      if (idx === -1) continue;
+      headers[l.slice(0, idx).trim().toLowerCase()] = l.slice(idx + 1).trim();
+    }
+    if (headers['icy-metaint']) {
+      const m = parseInt(headers['icy-metaint'], 10);
+      if (Number.isFinite(m) && m > 0) {
+        metaint = m;
+        bytesUntilMeta = metaint;
+      }
+    }
+    if (res.flushHeaders) res.flushHeaders();
+  }
+
+  function forwardAudio(buffer) {
+    if (!metaint) {
+      if (buffer.length) {
+        if (!res.write(buffer)) {
+          sock.pause();
+          res.once('drain', () => sock.resume());
+        }
+      }
+      return;
+    }
+    bodyBuf = Buffer.concat([bodyBuf, buffer]);
+    while (bodyBuf.length) {
+      if (bytesUntilMeta > 0) {
+        const n = Math.min(bytesUntilMeta, bodyBuf.length);
+        const audioChunk = bodyBuf.slice(0, n);
+        if (audioChunk.length) {
+          if (!res.write(audioChunk)) {
+            sock.pause();
+            res.once('drain', () => sock.resume());
+          }
+        }
+        bodyBuf = bodyBuf.slice(n);
+        bytesUntilMeta -= n;
+        if (bytesUntilMeta > 0) break;
+        needMetaLenByte = true;
+      }
+      if (needMetaLenByte) {
+        if (bodyBuf.length < 1) break;
+        const lenByte = bodyBuf[0];
+        bodyBuf = bodyBuf.slice(1);
+        metaBytesRemaining = (lenByte & 0xff) * 16;
+        needMetaLenByte = false;
+        if (metaBytesRemaining === 0) {
+          bytesUntilMeta = metaint;
+          continue;
+        }
+      }
+      if (metaBytesRemaining > 0) {
+        if (bodyBuf.length < metaBytesRemaining) {
+          metaBytesRemaining -= bodyBuf.length;
+          bodyBuf = Buffer.alloc(0);
+          break;
+        } else {
+          bodyBuf = bodyBuf.slice(metaBytesRemaining);
+          metaBytesRemaining = 0;
+          bytesUntilMeta = metaint;
+        }
+      }
+    }
+  }
+
+  sock.on('data', (chunk) => {
+    if (!headerDone) {
+      headerBuf = Buffer.concat([headerBuf, chunk]);
+      let headerEnd = headerBuf.indexOf('\r\n\r\n');
+      if (headerEnd === -1) headerEnd = headerBuf.indexOf('\n\n');
+      if (headerEnd === -1 && headerBuf.length < 64 * 1024) return;
+      if (headerEnd === -1) {
+        res.status(502).end('Bad Gateway');
+        try { sock.destroy(); } catch {}
+        return;
+      }
+      const head = headerBuf.slice(0, headerEnd).toString('utf8');
+      const remainder = headerBuf.slice(headerEnd + ((headerBuf[headerEnd] === '\r'.charCodeAt(0)) ? 4 : 2));
+      headerDone = true;
+      parseHeaders(head);
+      if (remainder.length) forwardAudio(remainder);
+      return;
+    }
+    forwardAudio(chunk);
+  });
+
+  sock.on('error', (err) => {
+    console.error('[stream-proxy] erro:', err.message);
+    if (!res.headersSent) res.status(502).end('Bad Gateway');
+    try { sock.destroy(); } catch {}
+  });
+
+  sock.on('end', () => { try { res.end(); } catch {} });
+  sock.on('close', () => { try { res.end(); } catch {} });
+  req.on('close', () => { try { sock.destroy(); } catch {} });
+}
+
+// Rotas do stream
+app.get('/stream', handleStream);
+app.get('/stream/;', handleStream);
+app.options('/stream', (req, res) => { allowCORS(res); res.status(204).end(); });
+app.options('/stream/;', (req, res) => { allowCORS(res); res.status(204).end(); });
+
+
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 process.on('unhandledRejection', (reason) => console.error('[unhandledRejection]', reason));
 
