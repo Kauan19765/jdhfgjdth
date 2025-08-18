@@ -307,6 +307,27 @@ const server = app.listen(PORT, () => {
   }, Math.max(500, CACHE_DURATION));
 });
 
+// rota /player -> copia simples do sonicpanel player, mas com CORS liberado
+app.get('/player', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+      <meta name="viewport" content="width=device-width">
+      <title>Player Ao Vivo</title>
+    </head>
+    <body style="margin:0;display:flex;justify-content:center;align-items:center;height:100vh;background:#111;color:#fff">
+      <video controls autoplay name="media" style="width:100%;max-width:400px">
+        <source src="http://sonicpanel.oficialserver.com:8342/;" type="audio/mpeg">
+        Seu navegador não suporta o player de áudio.
+      </video>
+    </body>
+    </html>
+  `);
+});
+
+
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 process.on('unhandledRejection', (reason) => console.error('[unhandledRejection]', reason));
 
