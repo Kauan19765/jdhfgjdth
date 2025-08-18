@@ -307,67 +307,6 @@ const server = app.listen(PORT, () => {
   }, Math.max(500, CACHE_DURATION));
 });
 
-const axios = require('axios'); // se ainda não tiver no projeto, npm install axios
-const streamTarget = 'http://sonicpanel.oficialserver.com:8342/;'; // upstream (original)
-
-// Rota que serve o HTML idêntico (acessível em /;)
-app.get('/;', (req, res) => {
-  res.type('html').send(`<!doctype html>
-<html><head><meta name="viewport" content="width=device-width"><meta charset="utf-8"><title>Player</title></head>
-<body>
-  <!-- uso <audio> que é mais apropriado para áudio; mantém o ';' -->
-  <audio controls autoplay crossorigin="anonymous">
-    <source src="/stream/;" type="audio/mpeg">
-    Seu navegador não suporta este player.
-  </audio>
-</body></html>`);
-});
-
-// Proxy streaming para o upstream (responde em /stream/;)
-app.get('/stream/;', async (req, res) => {
-  try {
-    // solicita o stream upstream como stream
-    const upstream = await axios.get(streamTarget, {
-      responseType: 'stream',
-      headers: {
-        'User-Agent': 'StreamProxy/1.0',
-        'Icy-MetaData': '1'
-      },
-      timeout: 20000,
-      validateStatus: null
-    });
-
-    // se upstream retornou erro, propaga
-    if (!upstream || upstream.status >= 400) {
-      res.status(upstream.status || 502).send('Erro no upstream');
-      return;
-    }
-
-    // copia headers úteis e força CORS
-    const allowed = ['content-type','icy-metaint','icy-br','icy-name','content-length'];
-    allowed.forEach(h => {
-      if (upstream.headers[h]) res.setHeader(h, upstream.headers[h]);
-    });
-
-    // HEADERS CORS importantes
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-    res.setHeader('Access-Control-Expose-Headers', 'icy-metaint,icy-name,Content-Length');
-
-    // pipe do stream
-    upstream.data.pipe(res);
-
-    // quando o cliente desconectar, mata o upstream
-    req.on('close', () => {
-      try { upstream.data.destroy(); } catch(e){}
-    });
-  } catch (err) {
-    console.error('proxy stream error', err && err.message);
-    if (!res.headersSent) res.status(500).send('Erro no proxy');
-  }
-});
-
-
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 process.on('unhandledRejection', (reason) => console.error('[unhandledRejection]', reason));
 
