@@ -307,64 +307,79 @@ const server = app.listen(PORT, () => {
   }, Math.max(500, CACHE_DURATION));
 });
 
-const streamTarget = 'http://sonicpanel.oficialserver.com:8342/;'; // upstream (original)
-
-// Rota que serve o HTML idêntico (acessível em /;)
-app.get('/;', (req, res) => {
-  res.type('html').send(`<!doctype html>
-<html><head><meta name="viewport" content="width=device-width"><meta charset="utf-8"><title>Player</title></head>
-<body>
-  <!-- uso <audio> que é mais apropriado para áudio; mantém o ';' -->
-  <audio controls autoplay crossorigin="anonymous">
-    <source src="/stream/;" type="audio/mpeg">
-    Seu navegador não suporta este player.
-  </audio>
-</body></html>`);
+// ====== 1) Teste TCP de reachability (útil para logs no Render) ======
+const net = require('net');
+app.get('/probe-tcp', async (req, res) => {
+  const HOST = 'sonicpanel.oficialserver.com';
+  const PORT = 8342;
+  const socket = new net.Socket();
+  let connected = false;
+  socket.setTimeout(8000);
+  socket.on('connect', () => { connected = true; socket.destroy(); });
+  socket.on('timeout', () => { socket.destroy(); });
+  socket.on('error', () => {});
+  socket.on('close', () => {
+    res.json({ host: HOST, port: PORT, reachable: connected });
+  });
+  socket.connect(PORT, HOST);
 });
 
-// Proxy streaming para o upstream (responde em /stream/;)
-app.get('/stream/;', async (req, res) => {
-  try {
-    // solicita o stream upstream como stream
-    const upstream = await axios.get(streamTarget, {
-      responseType: 'stream',
-      headers: {
-        'User-Agent': 'StreamProxy/1.0',
-        'Icy-MetaData': '1'
-      },
-      timeout: 20000,
-      validateStatus: null
+// ====== 2) Proxy de streaming usando http.request (mantém ';' no path) ======
+const streamHost = 'sonicpanel.oficialserver.com';
+const streamPort = 8342;
+const streamPath = '/;'; // o ';' é parte do caminho
+
+app.get('/stream/;', (req, res) => {
+  console.log('[proxy] tentanto conectar upstream ->', streamHost + ':' + streamPort + streamPath);
+  const options = {
+    hostname: streamHost,
+    port: streamPort,
+    path: streamPath,
+    method: 'GET',
+    headers: {
+      'User-Agent': 'Node-Stream-Proxy/1.0',
+      'Icy-MetaData': '1',
+      'Connection': 'keep-alive',
+      'Accept': '*/*'
+    },
+    timeout: 20000
+  };
+
+  const upstreamReq = http.request(options, upstreamRes => {
+    console.log('[proxy] upstream status', upstreamRes.statusCode);
+    // se o upstream não fornecer content-type, forçamos audio/mpeg
+    const ct = upstreamRes.headers['content-type'] || 'audio/mpeg';
+    // repassa headers úteis e adiciona CORS
+    Object.entries(Object.assign({}, upstreamRes.headers, {
+      'access-control-allow-origin': '*'
+    })).forEach(([k,v]) => {
+      try { res.setHeader(k, v); } catch(e){}
     });
-
-    // se upstream retornou erro, propaga
-    if (!upstream || upstream.status >= 400) {
-      res.status(upstream.status || 502).send('Erro no upstream');
-      return;
-    }
-
-    // copia headers úteis e força CORS
-    const allowed = ['content-type','icy-metaint','icy-br','icy-name','content-length'];
-    allowed.forEach(h => {
-      if (upstream.headers[h]) res.setHeader(h, upstream.headers[h]);
-    });
-
-    // HEADERS CORS importantes
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-    res.setHeader('Access-Control-Expose-Headers', 'icy-metaint,icy-name,Content-Length');
-
+    res.statusCode = upstreamRes.statusCode || 200;
     // pipe do stream
-    upstream.data.pipe(res);
+    upstreamRes.pipe(res);
+    upstreamRes.on('end', () => console.log('[proxy] upstream ended'));
+  });
 
-    // quando o cliente desconectar, mata o upstream
-    req.on('close', () => {
-      try { upstream.data.destroy(); } catch(e){}
-    });
-  } catch (err) {
-    console.error('proxy stream error', err && err.message);
-    if (!res.headersSent) res.status(500).send('Erro no proxy');
-  }
+  upstreamReq.on('timeout', () => {
+    console.error('[proxy] request timeout ao conectar upstream');
+    upstreamReq.destroy();
+    if (!res.headersSent) res.status(504).send('Upstream timeout');
+  });
+
+  upstreamReq.on('error', (err) => {
+    console.error('[proxy] erro ao conectar upstream:', err && (err.code || err.message));
+    if (!res.headersSent) res.status(502).send('Erro ao conectar upstream: ' + (err.code || err.message));
+  });
+
+  req.on('close', () => {
+    try { upstreamReq.destroy(); } catch(e){}
+    console.log('[proxy] cliente desconectou');
+  });
+
+  upstreamReq.end();
 });
+
 
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 process.on('unhandledRejection', (reason) => console.error('[unhandledRejection]', reason));
