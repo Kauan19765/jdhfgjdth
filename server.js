@@ -4,6 +4,7 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
+const iconv = require('iconv-lite');
 
 const app = express();
 app.use(cors());
@@ -64,10 +65,45 @@ function sanitize(value) {
 async function scrapeShoutcastData() {
   try {
     const res = await axios.get(SCRAPE_URL, {
-      headers: { 'User-Agent': USER_AGENT },
-      timeout: AXIOS_TIMEOUT
+        headers: { 'User-Agent': USER_AGENT },
+        timeout: AXIOS_TIMEOUT,
+        responseType: 'arraybuffer' // importante: receber bruto para decodificar corretamente
     });
-    const html = res.data;
+
+    const raw = res.data; // Buffer (ArrayBuffer)
+    let html;
+
+    // 1) tenta detectar charset a partir do header Content-Type
+    let charset = '';
+    const ct = (res.headers && res.headers['content-type']) ? res.headers['content-type'] : '';
+    const m = ct.match(/charset=([^;]+)/i);
+    if (m) charset = m[1].trim().toLowerCase();
+
+    try {
+        if (charset && !/utf-?8/i.test(charset)) {
+            const iconvName = (charset === 'iso-8859-1') ? 'latin1' : charset;
+            html = iconv.decode(Buffer.from(raw), iconvName);
+        } else {
+            html = Buffer.from(raw).toString('utf8');
+        }
+    } catch (err) {
+        // fallback: tenta latin1, depois utf8
+        try { html = iconv.decode(Buffer.from(raw), 'latin1'); }
+        catch (e) { html = Buffer.from(raw).toString('utf8'); }
+    }
+
+    // 2) checa <meta charset> no HTML e reaplica se necessário
+    try {
+        const meta = html.match(/<meta[^>]+charset=["']?\s*([^"'>\s;]+)/i);
+        if (meta && meta[1]) {
+            const metaEnc = meta[1].trim().toLowerCase();
+            if (!/utf-?8/i.test(metaEnc) && metaEnc !== charset) {
+                try {
+                    html = iconv.decode(Buffer.from(raw), metaEnc === 'iso-8859-1' ? 'latin1' : metaEnc);
+                } catch (e) { /* se falhar, mantém anterior */ }
+            }
+        }
+    } catch (e) { /* ignora erros */ }
 
     // removendo scripts antes de carregar
     const htmlNoScripts = stripScripts(html);
